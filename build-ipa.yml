@@ -1,0 +1,55 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: 安装 xcodegen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        working-directory: asterx/app
+        run: xcodegen generate
+
+      - name: 归档（未签名）
+        working-directory: asterx/app
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project AsterX.xcodeproj \
+            -scheme AsterX \
+            -configuration Release \
+            -archivePath build/AsterX.xcarchive \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: 打包 IPA
+        working-directory: asterx/app
+        run: |
+          APP="build/AsterX.xcarchive/Products/Applications/AsterX.app"
+          rm -rf build/Payload && mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          rm -rf build/Payload/AsterX.app/_CodeSignature
+          cd build && zip -qry AsterX.ipa Payload && ls -lh AsterX.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AsterX-unsigned-ipa
+          path: asterx/app/build/AsterX.ipa
+          retention-days: 30
