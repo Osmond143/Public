@@ -1,0 +1,38 @@
+name: VEspProbe
+
+options:
+  bundleIdPrefix: com.vesp
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGN_ENTITLEMENTS: ""
+    ENABLE_BITCODE: "NO"
+    ONLY_ACTIVE_ARCH: "NO"
+    ARCHS: "arm64"
+    CLANG_ENABLE_OBJC_ARC: "YES"
+
+targets:
+  VEspProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vesp.probe
+        PRODUCT_NAME: VEspProbe
+        INFOPLIST_FILE: Sources/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    dependencies:
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
