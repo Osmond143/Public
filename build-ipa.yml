@@ -1,4 +1,4 @@
-name:.github/workflows/build-ipa.yml
+name: .github/workflows/build-ipa.yml
 
 on:
   push:
