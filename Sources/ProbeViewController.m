@@ -2,6 +2,7 @@
 #import "ProbeViewController.h"
 #import "ProbeClient.h"
 #include "DumpOffsets.h"
+#include <unistd.h>
 
 @interface ProbeViewController ()
 @property (nonatomic, strong) UITextView *log;
