@@ -3,8 +3,10 @@
 
 #import <mach/mach.h>
 #import <mach/mach_error.h>
-#import <servers/bootstrap.h>
 #include <dlfcn.h>
+
+extern mach_port_t  bootstrap_port;
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 
 // 私有符号：消费沙盒扩展令牌
 extern int sandbox_extension_consume(const char *extension_token);
