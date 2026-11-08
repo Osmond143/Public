@@ -33,7 +33,7 @@ static int is_uobject(krw_read_fn rd, uint64_t p, uint64_t *cls) {
     if (!rd64(rd, p, &vt)) return 0;
     if (!is_text_ptr(vt)) return 0;
     uint64_t c = 0;
-    if (!rd(rd, p + 0x10, &c, 8) || !c) return 0;
+    if (!rd(p + 0x10, &c, 8) || !c) return 0;
     uint64_t cvt = 0;
     if (!rd64(rd, c, &cvt)) return 0;
     if (!is_text_ptr(cvt)) return 0;
@@ -54,7 +54,7 @@ static int probe_tarray(krw_read_fn rd, uint64_t base, uint32_t off, uint32_t *n
     for (i = 0; i < num && checked < 4; i += step, checked++) {
         uint64_t e = 0;
         uint64_t c = 0;
-        if (!rd(rd, data + (uint64_t)i * 8, &e, 8)) return 0;
+        if (!rd(data + (uint64_t)i * 8, &e, 8)) return 0;
         if (!e) continue;
         if (is_uobject(rd, e, &c)) ok++;
     }
@@ -74,7 +74,7 @@ static void scan_object(krw_read_fn rd, uint64_t obj, const char *label, uint32_
 
         uint64_t data = 0;
         uint64_t e0 = 0, c0 = 0;
-        rd(rd, obj + off, &data, 8);
+        rd(obj + off, &data, 8);
         if (!rd64(rd, data, &e0)) continue;
         if (!is_uobject(rd, e0, &c0)) continue;
 
