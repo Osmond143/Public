@@ -1,13 +1,12 @@
 // hook_license.m
-// 注入到 CodeV（无畏契约手游）进程，绕过「不死鸟 HUD」的卡密验证
+// 注入到 CodeV（无畏契约手游）进程，分析「不死鸟 HUD」的卡密验证
 //
-// 原理：
-//   1. 找到 江雪 / MenuInteraction 类，hook setOnConfirm: 把验证成功回调的 block 存下来
-//   2. hook confirmButtonTapped：点确认时直接调用保存的 block，跳过网络验证
-//   3. 兜底：hook stringForKey: 把读到的键名/值打印出来
+// 第 2 版：只观察，不动原流程（避免闪退）
+//   1. hook setOnConfirm:     保存验证成功回调的 block
+//   2. hook confirmButtonTapped 只打日志（不调 block，不发网络请求）
+//   3. hook stringForKey: / objectForKey: / setObject:forKey:  打印所有 UserDefaults 读写
 //
-// 全部用 method_setImplementation（改 __DATA 里的 method_t），
-// 不改代码段，不需要 inline hook，也不需要内核读写。
+// 目标是拿到卡密状态的「键名」和「期望值」，下一版再针对性注入。
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -15,12 +14,11 @@
 #include <mach-o/dyld.h>
 #include <unistd.h>
 
-// CodeV 是沙盒 app，写不了 /var/mobile，改写到自己的 tmp
+static NSMutableString *gLog = nil;
+
 static NSString *logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"vesp_license.log"];
 }
-
-static NSMutableString *gLog = nil;
 
 static void L(NSString *fmt, ...) {
     va_list ap;
@@ -35,10 +33,11 @@ static void L(NSString *fmt, ...) {
 
 // ---------------------------------------------------------------- 保存的 block
 static id g_savedBlock = nil;
-static int g_hookedSetOnConfirm = 0;
 
 static void my_setOnConfirm(id self, SEL _cmd, id block) {
-    L(@"[setOnConfirm:] self=%s block=%p", object_getClassName(self), block);
+    // 用 %@ 打印，避免 %s 乱码
+    Class c = object_getClass(self);
+    L(@"[setOnConfirm:] class=%@ block=%p", NSStringFromClass(c), block);
     if (block) {
         g_savedBlock = [block copy];
         L(@"  已保存 block");
@@ -47,30 +46,45 @@ static void my_setOnConfirm(id self, SEL _cmd, id block) {
 
 // ---------------------------------------------------------------- confirmButtonTapped
 static void my_confirmButtonTapped(id self, SEL _cmd) {
-    L(@"[confirmButtonTapped] self=%s", object_getClassName(self));
-    if (g_savedBlock) {
-        L(@"  跳过验证，直接调用 _onConfirm block");
-        @try {
-            void (^b)(void) = g_savedBlock;
-            b();
-        } @catch (NSException *e) {
-            L(@"  block 调用异常: %@", e);
-        }
-    } else {
-        L(@"  还没拿到 block，无法跳过");
-    }
+    Class c = object_getClass(self);
+    L(@"[confirmButtonTapped] class=%@  (不调 block，避免崩溃)", NSStringFromClass(c));
+    L(@"  已保存的 block: %p", g_savedBlock);
 }
 
-// ---------------------------------------------------------------- stringForKey:
+// ---------------------------------------------------------------- UserDefaults 读写
 static IMP g_origStringForKey = NULL;
+static IMP g_origObjectForKey = NULL;
+static IMP g_origSetObject = NULL;
 
 static id my_stringForKey(id self, SEL _cmd, NSString *key) {
     id v = nil;
     if (g_origStringForKey) {
         v = ((id(*)(id,SEL,id))g_origStringForKey)(self, _cmd, key);
     }
-    L(@"[stringForKey:] key=%@ -> %@", key, v);
+    L(@"[stringForKey:] class=%@ key=%@ -> %@",
+      NSStringFromClass(object_getClass(self)), key, v);
     return v;
+}
+
+static id my_objectForKey(id self, SEL _cmd, NSString *key) {
+    id v = nil;
+    if (g_origObjectForKey) {
+        v = ((id(*)(id,SEL,id))g_origObjectForKey)(self, _cmd, key);
+    }
+    L(@"[objectForKey:] class=%@ key=%@ -> %@ (%@)",
+      NSStringFromClass(object_getClass(self)), key, v,
+      v ? NSStringFromClass(object_getClass(v)) : @"nil");
+    return v;
+}
+
+static void my_setObject(id self, SEL _cmd, id value, NSString *key) {
+    Class vc = value ? object_getClass(value) : nil;
+    L(@"[setObject:forKey:] class=%@ key=%@ value=%@ (%@)",
+      NSStringFromClass(object_getClass(self)), key, value,
+      vc ? NSStringFromClass(vc) : @"nil");
+    if (g_origSetObject) {
+        ((void(*)(id,SEL,id,id))g_origSetObject)(self, _cmd, value, key);
+    }
 }
 
 // ---------------------------------------------------------------- 主逻辑
@@ -84,21 +98,22 @@ static void hook_all(void) {
     SEL selSetOnConfirm = sel_registerName("setOnConfirm:");
     SEL selConfirm      = sel_registerName("confirmButtonTapped");
     SEL selStringForKey = sel_registerName("stringForKey:");
+    SEL selObjectForKey = sel_registerName("objectForKey:");
+    SEL selSetObject    = sel_registerName("setObject:forKey:");
 
-    int hookedA = 0, hookedB = 0, hookedC = 0;
+    int hookedA = 0, hookedB = 0, hookedC = 0, hookedD = 0, hookedE = 0;
 
     for (int i = 0; i < n; i++) {
         Class c = classes[i];
         const char *cn = class_getName(c);
         if (!cn) continue;
 
-        // 只看挂自己的类（江雪 / MenuInteraction / MenuLoad）
         BOOL interesting = (strcmp(cn, "江雪") == 0 ||
                             strcmp(cn, "MenuInteraction") == 0 ||
                             strcmp(cn, "MenuLoad") == 0);
         if (!interesting) continue;
 
-        L(@"发现类: %s", cn);
+        L(@"发现类: %@", NSStringFromClass(c));
 
         Method mA = class_getInstanceMethod(c, selSetOnConfirm);
         if (mA) {
@@ -121,7 +136,7 @@ static void hook_all(void) {
         }
     }
 
-    // NSUserDefaults 的 stringForKey: 也 hook 一份（兜底打印键名）
+    // NSUserDefaults 的读写（全局，兜底）
     Class ud = objc_getClass("NSUserDefaults");
     if (ud) {
         Method mC = class_getInstanceMethod(ud, selStringForKey);
@@ -131,33 +146,31 @@ static void hook_all(void) {
             L(@"  hook NSUserDefaults stringForKey:");
             hookedC++;
         }
+        Method mD = class_getInstanceMethod(ud, selObjectForKey);
+        if (mD) {
+            g_origObjectForKey = method_getImplementation(mD);
+            method_setImplementation(mD, (IMP)my_objectForKey);
+            L(@"  hook NSUserDefaults objectForKey:");
+            hookedD++;
+        }
+        Method mE = class_getInstanceMethod(ud, selSetObject);
+        if (mE) {
+            g_origSetObject = method_getImplementation(mE);
+            method_setImplementation(mE, (IMP)my_setObject);
+            L(@"  hook NSUserDefaults setObject:forKey:");
+            hookedE++;
+        }
     }
 
-    g_hookedSetOnConfirm = hookedA;
-    L(@"完成: setOnConfirm=%d confirm=%d stringForKey=%d", hookedA, hookedB, hookedC);
-    free(classes);
-
+    L(@"完成: setOnConfirm=%d confirm=%d stringForKey=%d objectForKey=%d setObject=%d",
+      hookedA, hookedB, hookedC, hookedD, hookedE);
     L(@"日志: %@", logPath());
-
-    // 弹窗显示（方便直接截图）
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *w = UIApplication.sharedApplication.keyWindow;
-        UIViewController *root = w.rootViewController;
-        if (!root) return;
-        UIAlertController *ac =
-            [UIAlertController alertControllerWithTitle:@"license hook"
-                                                message:[gLog copy]
-                                         preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"OK"
-                                               style:UIAlertActionStyleDefault handler:nil]];
-        [root presentViewController:ac animated:YES completion:nil];
-    });
+    free(classes);
 }
 
 __attribute__((constructor))
 static void license_ctor(void) {
     NSLog(@"[license] dylib loaded, pid=%d", getpid());
-    // 游戏加载 tgpa_wrapper 需要时间，等 12 秒
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(0, 0), ^{
         hook_all();
