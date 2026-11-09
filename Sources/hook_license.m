@@ -149,6 +149,20 @@ static void my_setOnConfirm(id self, SEL _cmd, id block) {
     if (block) {
         g_savedBlock = [block copy];
         L(@"  已保存 block");
+
+        // 自动尝试调用（延迟 3 秒，主线程），验证是否等于「解锁」
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!g_savedBlock) return;
+            L(@"[auto] 尝试调用 _onConfirm block（跳过验证）");
+            @try {
+                void (^b)(void) = g_savedBlock;
+                b();
+                L(@"[auto] block 调用返回（没崩）");
+            } @catch (NSException *e) {
+                L(@"[auto] block 异常: %@", e);
+            }
+        });
     }
 }
 
