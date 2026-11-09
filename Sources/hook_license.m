@@ -131,14 +131,8 @@ static void vesp_abort(void) {
     for (;;) sleep(1);
 }
 
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { const void *replacement; const void *replacee; } \
-    _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = \
-    { (const void *)(unsigned long)&_replacement, (const void *)(unsigned long)&_replacee };
-
-DYLD_INTERPOSE(vesp_exit, exit)
-DYLD_INTERPOSE(vesp_exit, _exit)
-DYLD_INTERPOSE(vesp_abort, abort)
+/* v9：去掉 DYLD_INTERPOSE —— 已证明卡密失败走的是 SIGSEGV，不是 exit/abort，
+   而且 __DATA,__interpose 段在无签名 dylib 上容易编译/加载报错。 */
 
 // ---------------------------------------------------------------- setOnConfirm:
 static id g_savedBlock = nil;
