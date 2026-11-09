@@ -24,6 +24,7 @@ jobs:
         run: |
           xcodegen generate
           ls -la
+          ls -la libhook.xcodeproj 2>/dev/null || true
 
       - name: Build dylib (unsigned)
         run: |
@@ -33,7 +34,8 @@ jobs:
             -target libhook \
             -sdk iphoneos \
             -configuration Release \
-            -derivedDataPath build \
+            SYMROOT="$(pwd)/out" \
+            OBJROOT="$(pwd)/out/obj" \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -43,14 +45,16 @@ jobs:
 
       - name: Locate dylib
         run: |
-          find build -name "*.dylib" -maxdepth 6 -print
-          DYLIB=$(find build -name "libhook.dylib" -maxdepth 6 | head -1)
-          echo "DYLIB=$DYLIB"
-          ls -lh "$DYLIB"
+          echo "--- out 目录 ---"
+          find out -name "*.dylib" -print 2>/dev/null || true
+          echo "--- 全局搜索 ---"
+          find . -name "libhook.dylib" -print 2>/dev/null || true
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: libhook-dylib
-          path: build/Build/Products/Release-iphoneos/libhook.dylib
+          path: |
+            out/Release-iphoneos/libhook.dylib
+            out/**/libhook.dylib
           if-no-files-found: error
