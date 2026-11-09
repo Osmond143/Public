@@ -61,7 +61,7 @@ def main():
     if b is None:
         raise SystemExit("lief 解析 CodeV 失败")
 
-    have = any(DYLIB_NAME in lib for lib in b.libraries)
+    have = any(DYLIB_NAME in getattr(lib, "name", "") for lib in b.libraries)
     if have:
         print("      已经有 %s，跳过" % DYLIB_NAME)
     else:
