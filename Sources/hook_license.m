@@ -143,26 +143,71 @@ DYLD_INTERPOSE(vesp_abort, abort)
 // ---------------------------------------------------------------- setOnConfirm:
 static id g_savedBlock = nil;
 
+// block 结构（libclosure）
+struct vesp_block_layout {
+    void *isa;
+    int flags;
+    int reserved;
+    void (*invoke)(void *, ...);
+    void *descriptor;
+};
+
+static void dump_block(id block, const char *tag) {
+    if (!block) return;
+    struct vesp_block_layout *b = (struct vesp_block_layout *)block;
+    L(@"[block %s] isa=%p flags=%#x invoke=%p descriptor=%p",
+      tag, b->isa, b->flags, (void *)b->invoke, b->descriptor);
+
+    if (b->descriptor) {
+        uintptr_t *d = (uintptr_t *)b->descriptor;
+        /* descriptor: reserved, size, [signature] */
+        const char *sig = (const char *)d[2];
+        if (sig && (uintptr_t)sig > 0x1000) {
+            L(@"[block %s] signature=%s", tag, sig);
+        } else {
+            L(@"[block %s] 无 signature 指针 (d2=%p)", tag, (void *)d[2]);
+        }
+        L(@"[block %s] size=%lu", tag, (unsigned long)d[1]);
+    }
+
+    /* 如果 invoke 落在 tgpa_wrapper 里，打印相对偏移，方便反汇编 */
+    if (b->invoke) {
+        uint32_t n = _dyld_image_count();
+        for (uint32_t i = 0; i < n; i++) {
+            const char *nm = _dyld_get_image_name(i);
+            if (!nm || !strstr(nm, "tgpa_wrapper")) continue;
+            uintptr_t base = (uintptr_t)_dyld_get_image_header(i);
+            uintptr_t fn = (uintptr_t)b->invoke;
+            if (fn >= base && fn < base + 0x20000000) {
+                L(@"[block %s] invoke 在 tgpa_wrapper 内, 偏移=%#lx (base=%p)",
+                  tag, (unsigned long)(fn - base), (void *)base);
+            }
+        }
+    }
+}
+
 static void my_setOnConfirm(id self, SEL _cmd, id block) {
     L(@"[setOnConfirm:] class=%@ block=%p",
       NSStringFromClass(object_getClass(self)), block);
     if (block) {
+        dump_block(block, "orig");
         g_savedBlock = [block copy];
+        dump_block(g_savedBlock, "copy");
         L(@"  已保存 block");
 
-        // 自动尝试调用（延迟 3 秒，主线程），验证是否等于「解锁」
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (!g_savedBlock) return;
-            L(@"[auto] 尝试调用 _onConfirm block（跳过验证）");
-            @try {
+        // 延迟 5 秒再调（给用户时间看日志），且只调一次
+        static int tried = 0;
+        if (!tried) {
+            tried = 1;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!g_savedBlock) return;
+                L(@"[auto] 5 秒到，调用 _onConfirm block");
                 void (^b)(void) = g_savedBlock;
                 b();
-                L(@"[auto] block 调用返回（没崩）");
-            } @catch (NSException *e) {
-                L(@"[auto] block 异常: %@", e);
-            }
-        });
+                L(@"[auto] block 返回（没崩）");
+            });
+        }
     }
 }
 
