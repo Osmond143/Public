@@ -148,7 +148,7 @@ struct vesp_block_layout {
 
 static void dump_block(id block, const char *tag) {
     if (!block) return;
-    struct vesp_block_layout *b = (struct vesp_block_layout *)block;
+    struct vesp_block_layout *b = (__bridge struct vesp_block_layout *)block;
     L(@"[block %s] isa=%p flags=%#x invoke=%p descriptor=%p",
       tag, b->isa, b->flags, (void *)b->invoke, b->descriptor);
 
