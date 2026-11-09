@@ -1,12 +1,13 @@
 // hook_license.m
 // 注入到 CodeV（无畏契约手游）进程，分析「不死鸟 HUD」的卡密验证
 //
-// 第 2 版：只观察，不动原流程（避免闪退）
-//   1. hook setOnConfirm:     保存验证成功回调的 block
-//   2. hook confirmButtonTapped 只打日志（不调 block，不发网络请求）
-//   3. hook stringForKey: / objectForKey: / setObject:forKey:  打印所有 UserDefaults 读写
+// v3：观察模式 + 可刷新日志弹窗
+//   1. hook setOnConfirm:        保存验证成功回调的 block
+//   2. hook confirmButtonTapped  只打日志（不调 block，避免崩溃）
+//   3. hook stringForKey: / objectForKey: / setObject:forKey:  打印 UserDefaults 读写
+//   4. 弹窗显示日志，带「刷新」「复制」「关闭」三个按钮
 //
-// 目标是拿到卡密状态的「键名」和「期望值」，下一版再针对性注入。
+// 目标：拿到卡密状态的键名和期望值。
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -35,9 +36,8 @@ static void L(NSString *fmt, ...) {
 static id g_savedBlock = nil;
 
 static void my_setOnConfirm(id self, SEL _cmd, id block) {
-    // 用 %@ 打印，避免 %s 乱码
-    Class c = object_getClass(self);
-    L(@"[setOnConfirm:] class=%@ block=%p", NSStringFromClass(c), block);
+    L(@"[setOnConfirm:] class=%@ block=%p",
+      NSStringFromClass(object_getClass(self)), block);
     if (block) {
         g_savedBlock = [block copy];
         L(@"  已保存 block");
@@ -46,12 +46,12 @@ static void my_setOnConfirm(id self, SEL _cmd, id block) {
 
 // ---------------------------------------------------------------- confirmButtonTapped
 static void my_confirmButtonTapped(id self, SEL _cmd) {
-    Class c = object_getClass(self);
-    L(@"[confirmButtonTapped] class=%@  (不调 block，避免崩溃)", NSStringFromClass(c));
-    L(@"  已保存的 block: %p", g_savedBlock);
+    L(@"[confirmButtonTapped] class=%@ (不调 block)",
+      NSStringFromClass(object_getClass(self)));
+    L(@"  已保存 block: %p", g_savedBlock);
 }
 
-// ---------------------------------------------------------------- UserDefaults 读写
+// ---------------------------------------------------------------- UserDefaults
 static IMP g_origStringForKey = NULL;
 static IMP g_origObjectForKey = NULL;
 static IMP g_origSetObject = NULL;
@@ -61,7 +61,7 @@ static id my_stringForKey(id self, SEL _cmd, NSString *key) {
     if (g_origStringForKey) {
         v = ((id(*)(id,SEL,id))g_origStringForKey)(self, _cmd, key);
     }
-    L(@"[stringForKey:] class=%@ key=%@ -> %@",
+    L(@"[stringForKey:] %@ key=%@ -> %@",
       NSStringFromClass(object_getClass(self)), key, v);
     return v;
 }
@@ -71,20 +71,67 @@ static id my_objectForKey(id self, SEL _cmd, NSString *key) {
     if (g_origObjectForKey) {
         v = ((id(*)(id,SEL,id))g_origObjectForKey)(self, _cmd, key);
     }
-    L(@"[objectForKey:] class=%@ key=%@ -> %@ (%@)",
-      NSStringFromClass(object_getClass(self)), key, v,
-      v ? NSStringFromClass(object_getClass(v)) : @"nil");
+    L(@"[objectForKey:] %@ key=%@ -> %@",
+      NSStringFromClass(object_getClass(self)), key, v);
     return v;
 }
 
 static void my_setObject(id self, SEL _cmd, id value, NSString *key) {
-    Class vc = value ? object_getClass(value) : nil;
-    L(@"[setObject:forKey:] class=%@ key=%@ value=%@ (%@)",
-      NSStringFromClass(object_getClass(self)), key, value,
-      vc ? NSStringFromClass(vc) : @"nil");
+    L(@"[setObject:forKey:] %@ key=%@ value=%@",
+      NSStringFromClass(object_getClass(self)), key, value);
     if (g_origSetObject) {
         ((void(*)(id,SEL,id,id))g_origSetObject)(self, _cmd, value, key);
     }
+}
+
+// ---------------------------------------------------------------- 日志弹窗
+static void show_log_window(void);
+
+static void show_log_window(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *root = nil;
+        for (UIWindow *win in UIApplication.sharedApplication.windows) {
+            if (win.rootViewController) { root = win.rootViewController; break; }
+        }
+        if (!root) {
+            NSLog(@"[license] 找不到 rootViewController，日志在 %@", logPath());
+            return;
+        }
+        // 关掉已有的
+        if (root.presentedViewController &&
+            [root.presentedViewController isKindOfClass:[UIAlertController class]]) {
+            [root dismissViewControllerAnimated:NO completion:nil];
+        }
+
+        NSString *text = gLog.length ? gLog : @"(空)";
+        if (text.length > 2600) {
+            text = [NSString stringWithFormat:@"...(前略)...\n%@",
+                    [text substringFromIndex:text.length - 2600]];
+        }
+
+        UIAlertController *ac =
+            [UIAlertController alertControllerWithTitle:@"license log"
+                                                message:text
+                                         preferredStyle:UIAlertControllerStyleAlert];
+
+        __weak typeof(root) wroot = root;
+        [ac addAction:[UIAlertAction actionWithTitle:@"刷新"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            show_log_window();
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"复制"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            UIPasteboard.generalPasteboard.string = gLog ?: @"";
+            NSLog(@"[license] 已复制到剪贴板");
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"关闭"
+                                               style:UIAlertActionStyleCancel
+                                             handler:nil]];
+
+        [wroot presentViewController:ac animated:YES completion:nil];
+    });
 }
 
 // ---------------------------------------------------------------- 主逻辑
@@ -136,7 +183,6 @@ static void hook_all(void) {
         }
     }
 
-    // NSUserDefaults 的读写（全局，兜底）
     Class ud = objc_getClass("NSUserDefaults");
     if (ud) {
         Method mC = class_getInstanceMethod(ud, selStringForKey);
@@ -166,6 +212,8 @@ static void hook_all(void) {
       hookedA, hookedB, hookedC, hookedD, hookedE);
     L(@"日志: %@", logPath());
     free(classes);
+
+    show_log_window();
 }
 
 __attribute__((constructor))
