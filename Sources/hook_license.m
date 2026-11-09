@@ -189,16 +189,17 @@ static void my_setOnConfirm(id self, SEL _cmd, id block) {
         dump_block(g_savedBlock, "copy");
         L(@"  已保存 block");
 
-        // 延迟 5 秒再调（给用户时间看日志），且只调一次
+        // signature=v16@?0r*8 -> void(^)(const char *)，必须传一个 C 字符串
         static int tried = 0;
         if (!tried) {
             tried = 1;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (!g_savedBlock) return;
-                L(@"[auto] 5 秒到，调用 _onConfirm block");
-                void (^b)(void) = g_savedBlock;
-                b();
+                const char *arg = "1";
+                L(@"[auto] 5 秒到，调用 _onConfirm(%%s) block", arg);
+                void (^b)(const char *) = g_savedBlock;
+                b(arg);
                 L(@"[auto] block 返回（没崩）");
             });
         }
