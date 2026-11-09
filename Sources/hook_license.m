@@ -1,25 +1,24 @@
 // hook_license.m
-// 注入到 CodeV（无畏契约手游）进程，分析「不死鸟 HUD」的卡密验证
+// 注入到 CodeV（无畏契约手游）进程，分析与绕过「不死鸟 HUD」的卡密验证
 //
-// v4：观察网络，不动原流程
-//   ✗ 不再 hook confirmButtonTapped（避免破坏 UI 状态导致闪退）
-//   ✗ 不再 hook UserDefaults（v3 已证明它不写 UserDefaults）
-//   ✓ hook +[NSURL URLWithString:]           打印请求地址
-//   ✓ hook +[NSJSONSerialization JSONObject...] 打印解析的原始数据
-//   ✓ hook -setOnConfirm:                    保存回调 block
-//   ✓ 弹窗可刷新/复制
+// v5：
+//   ✓ 不再自动弹窗（避免挡住卡密输入）→ 改成「三指长按屏幕 1.2 秒」触发
+//   ✓ 加 signal handler，崩溃时把信号和当前日志写到 vesp_crash.txt
+//   ✓ 保留网络观察（NSURL / NSJSONSerialization）
+//   ✗ 不 hook confirmButtonTapped（已证明替换它会崩）
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #include <mach-o/dyld.h>
 #include <unistd.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <string.h>
 
 static NSMutableString *gLog = nil;
-
-static NSString *logPath(void) {
-    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"vesp_license.log"];
-}
+static char gLogPathC[512] = {0};
+static char gCrashPathC[512] = {0};
 
 static void L(NSString *fmt, ...) {
     va_list ap;
@@ -29,12 +28,58 @@ static void L(NSString *fmt, ...) {
     if (!gLog) gLog = [NSMutableString string];
     [gLog appendFormat:@"%@\n", s];
     NSLog(@"[license] %@", s);
-    [gLog writeToFile:logPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    if (gLogPathC[0]) {
+        [gLog writeToFile:[NSString stringWithUTF8String:gLogPathC]
+               atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
 }
 
-static id g_savedBlock = nil;
+// ---------------------------------------------------------------- 崩溃记录
+static void crash_handler(int sig, siginfo_t *info, void *ctx) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+                     "\n[CRASH] signal=%d (%s) addr=%p\n",
+                     sig,
+                     sig == SIGSEGV ? "SIGSEGV" :
+                     sig == SIGABRT ? "SIGABRT" :
+                     sig == SIGILL  ? "SIGILL"  :
+                     sig == SIGBUS  ? "SIGBUS"  :
+                     sig == SIGFPE  ? "SIGFPE"  : "?",
+                     (void *)(info ? info->si_addr : NULL));
+    if (gCrashPathC[0] && n > 0) {
+        int fd = open(gCrashPathC, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            write(fd, buf, n);
+            if (gLog) {
+                const char *p = gLog.UTF8String;
+                size_t len = p ? strlen(p) : 0;
+                /* 只写尾部 8KB，避免信号处理里太大 */
+                if (len > 8192) { p += (len - 8192); len = 8192; }
+                if (len) write(fd, p, len);
+            }
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
+    signal(SIGTRAP, crash_handler);
+}
 
 // ---------------------------------------------------------------- setOnConfirm:
+static id g_savedBlock = nil;
+
 static void my_setOnConfirm(id self, SEL _cmd, id block) {
     L(@"[setOnConfirm:] class=%@ block=%p",
       NSStringFromClass(object_getClass(self)), block);
@@ -52,27 +97,26 @@ static id my_URLWithString(id self, SEL _cmd, NSString *s) {
     if (g_origURLWithString) {
         u = ((id(*)(id,SEL,id))g_origURLWithString)(self, _cmd, s);
     }
-    if (s.length) {
-        L(@"[URLWithString:] %@", s);
+    if (s.length && s.length < 300) {
+        L(@"[URL] %@", s);
     }
     return u;
 }
 
-// ---------------------------------------------------------------- NSJSONSerialization
+// ---------------------------------------------------------------- JSON 解析
 static IMP g_origJSONParse = NULL;
 
 static id my_JSONParse(id self, SEL _cmd, NSData *data, NSUInteger opt, NSError **err) {
-    if (data.length) {
+    if (data.length && data.length < 6000) {
         NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (!raw) raw = [data description];
-        if (raw.length > 1500) raw = [[raw substringToIndex:1500] stringByAppendingString:@"..."];
-        L(@"[JSONObjectWithData:] 原始数据(%lu bytes):\n%@", (unsigned long)data.length, raw);
+        if (raw && raw.length < 3000) {
+            L(@"[JSON in] %@", raw);
+        }
     }
     id r = nil;
     if (g_origJSONParse) {
         r = ((id(*)(id,SEL,id,NSUInteger,NSError**))g_origJSONParse)(self, _cmd, data, opt, err);
     }
-    L(@"[JSONObjectWithData:] 解析结果: %@", r);
     return r;
 }
 
@@ -83,19 +127,27 @@ static void show_log_window(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = nil;
         for (UIWindow *win in UIApplication.sharedApplication.windows) {
-            if (win.rootViewController) { root = win.rootViewController; break; }
+            if (win.isKeyWindow && win.rootViewController) { root = win.rootViewController; break; }
         }
-        if (!root) { NSLog(@"[license] 无 root, 日志 %@", logPath()); return; }
-
-        if (root.presentedViewController &&
-            [root.presentedViewController isKindOfClass:[UIAlertController class]]) {
-            [root dismissViewControllerAnimated:NO completion:nil];
+        if (!root) {
+            for (UIWindow *win in UIApplication.sharedApplication.windows) {
+                if (win.rootViewController) { root = win.rootViewController; break; }
+            }
         }
+        if (!root) { NSLog(@"[license] 无 root"); return; }
 
         NSString *text = gLog.length ? gLog : @"(空)";
-        if (text.length > 2600) {
+        if (text.length > 2200) {
             text = [NSString stringWithFormat:@"...(前略)...\n%@",
-                    [text substringFromIndex:text.length - 2600]];
+                    [text substringFromIndex:text.length - 2200]];
+        }
+        if (gCrashPathC[0]) {
+            NSString *crash = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:gCrashPathC]
+                                                        encoding:NSUTF8StringEncoding error:nil];
+            if (crash.length) {
+                if (crash.length > 800) crash = [crash substringFromIndex:crash.length - 800];
+                text = [NSString stringWithFormat:@"%@\n\n== 上次崩溃 ==\n%@", text, crash];
+            }
         }
 
         UIAlertController *ac =
@@ -103,7 +155,6 @@ static void show_log_window(void) {
                                                 message:text
                                          preferredStyle:UIAlertControllerStyleAlert];
         __weak typeof(root) wroot = root;
-
         [ac addAction:[UIAlertAction actionWithTitle:@"刷新"
                                                style:UIAlertActionStyleDefault
                                              handler:^(UIAlertAction *a) { show_log_window(); }]];
@@ -119,6 +170,46 @@ static void show_log_window(void) {
     });
 }
 
+// ---------------------------------------------------------------- 三指长按手势
+@interface VespGestureTarget : NSObject
+- (void)onLongPress:(UILongPressGestureRecognizer *)g;
+@end
+
+@implementation VespGestureTarget
+- (void)onLongPress:(UILongPressGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateBegan) {
+        show_log_window();
+    }
+}
+@end
+
+static VespGestureTarget *g_gestureTarget = nil;
+
+static void install_gesture(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_gestureTarget) g_gestureTarget = [VespGestureTarget new];
+        UIWindow *key = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { key = w; break; }
+        }
+        if (!key) {
+            for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                if (w.rootViewController) { key = w; break; }
+            }
+        }
+        if (!key) { NSLog(@"[license] 找不到 window，手势没挂上"); return; }
+
+        UILongPressGestureRecognizer *g =
+            [[UILongPressGestureRecognizer alloc] initWithTarget:g_gestureTarget
+                                                          action:@selector(onLongPress:)];
+        g.numberOfTouchesRequired = 3;
+        g.minimumPressDuration = 1.2;
+        g.cancelsTouchesInView = NO;
+        [key addGestureRecognizer:g];
+        NSLog(@"[license] 三指长按已挂上（1.2 秒）");
+    });
+}
+
 // ---------------------------------------------------------------- 主逻辑
 static void hook_all(void) {
     int n = objc_getClassList(NULL, 0);
@@ -127,8 +218,6 @@ static void hook_all(void) {
     L(@"类总数: %d", n);
 
     int hookedA = 0;
-
-    // 1) 江雪 的 setOnConfirm:
     SEL selSetOnConfirm = sel_registerName("setOnConfirm:");
     for (int i = 0; i < n; i++) {
         Class c = classes[i];
@@ -145,38 +234,41 @@ static void hook_all(void) {
     }
     free(classes);
 
-    // 2) NSURL URLWithString:  （类方法）
     Method mURL = class_getClassMethod(objc_getClass("NSURL"),
                                        sel_registerName("URLWithString:"));
     if (mURL) {
         g_origURLWithString = method_getImplementation(mURL);
         method_setImplementation(mURL, (IMP)my_URLWithString);
         L(@"  hook +[NSURL URLWithString:]");
-    } else {
-        L(@"  !! 没找到 +[NSURL URLWithString:]");
     }
 
-    // 3) NSJSONSerialization JSONObjectWithData:options:error:  （类方法）
     Method mJSON = class_getClassMethod(objc_getClass("NSJSONSerialization"),
                                         sel_registerName("JSONObjectWithData:options:error:"));
     if (mJSON) {
         g_origJSONParse = method_getImplementation(mJSON);
         method_setImplementation(mJSON, (IMP)my_JSONParse);
         L(@"  hook +[NSJSONSerialization JSONObjectWithData:options:error:]");
-    } else {
-        L(@"  !! 没找到 JSONObjectWithData:options:error:");
     }
 
     L(@"完成: setOnConfirm=%d", hookedA);
-    L(@"日志: %@", logPath());
-    show_log_window();
+    L(@"日志: %s", gLogPathC);
+    L(@"崩溃记录: %s", gCrashPathC);
+    L(@"  看日志: 三指长按屏幕 1.2 秒");
 }
 
 __attribute__((constructor))
 static void license_ctor(void) {
+    NSString *tmp = NSTemporaryDirectory();
+    strncpy(gLogPathC,
+            [[tmp stringByAppendingPathComponent:@"vesp_license.log"] UTF8String], 511);
+    strncpy(gCrashPathC,
+            [[tmp stringByAppendingPathComponent:@"vesp_crash.txt"] UTF8String], 511);
+
     NSLog(@"[license] dylib loaded, pid=%d", getpid());
+    install_crash_handler();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(0, 0), ^{
         hook_all();
+        install_gesture();
     });
 }
