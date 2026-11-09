@@ -1,4 +1,4 @@
-name: VEspProbe
+name: libhook
 
 options:
   bundleIdPrefix: com.vesp
@@ -16,23 +16,21 @@ settings:
     ONLY_ACTIVE_ARCH: "NO"
     ARCHS: "arm64"
     CLANG_ENABLE_OBJC_ARC: "YES"
+    SKIP_INSTALL: "YES"
 
 targets:
-  VEspProbe:
-    type: application
+  libhook:
+    type: library.dynamic
     platform: iOS
     sources:
       - path: Sources
-        excludes:
-          - Info.plist
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.vesp.probe
-        PRODUCT_NAME: VEspProbe
-        INFOPLIST_FILE: Sources/Info.plist
-        TARGETED_DEVICE_FAMILY: "1,2"
-        SWIFT_VERSION: "5.0"
-        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        PRODUCT_NAME: libhook
+        PRODUCT_BUNDLE_IDENTIFIER: com.vesp.hook
+        MACH_O_TYPE: mh_dylib
+        DYLIB_INSTALL_NAME_BASE: "@executable_path"
+        LD_DYLIB_INSTALL_NAME: "@executable_path/libhook.dylib"
     dependencies:
       - sdk: Foundation.framework
       - sdk: UIKit.framework

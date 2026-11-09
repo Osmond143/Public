@@ -1,148 +1,105 @@
-# VEspProbe — 编译说明（GitHub Actions）
+# 不死鸟 HUD 卡密 hook —— 编译与使用
 
-一个最小的 iOS app，用来在 iPad 上验证 DarkSword 的 KRW 通道并扫描无畏手游的偏移。
-
----
-
-## 一、你要做的（大约 10 分钟）
-
-### 1. 建一个 GitHub 仓库
-
-```
-名字随便，比如 vesp-probe，Private 或 Public 都行
-```
-
-### 2. 把 `app/` 目录**里面的内容**推上去
-
-**注意**：GitHub Actions 的 workflow 必须在仓库根目录的 `.github/workflows/`，
-所以推的是 `app/` 里面的东西，不是整个 `app/` 文件夹。
-
-```bash
-cd F:\Deepseek\dshwork\valorant_mobile\app
-git init
-git add .
-git commit -m "init"
-git branch -M main
-git remote add origin https://github.com/<你的用户名>/vesp-probe.git
-git push -u origin main
-```
-
-推完之后仓库根目录应该是这样：
-
-```
-.github/workflows/build-ipa.yml
-Sources/
-project.yml
-README.md
-```
-
-### 3. 等 Actions 跑完
-
-```
-GitHub → 你的仓库 → Actions 标签 → build-ipa
-第一次大约 5~8 分钟（要装 xcodegen）
-```
-
-### 4. 下载产物
-
-```
-Actions 运行页 → 底部 Artifacts → VEspProbe-ipa
-解压得到 VEspProbe.ipa
-```
-
-### 5. 用全力签/全能签签名装到 iPad
-
-```
-选 p12 + mobileprovision（就是之前那两个文件）
-给他 VEspProbe.ipa
-签名 → 安装
-```
-
-**bundle id** 记得改成一个没占用的，比如 `com.vesp.probe`（或者让签名工具自动改）。
+给无畏契约手游（CodeV）注入一个 dylib，hook 掉「不死鸟 HUD」的卡密验证。
 
 ---
 
-## 二、装上之后
+## 一、原理
 
-打开 app，会看到一个「运行探测」按钮和一个日志框。
-
-点一下，会输出：
+`tgpa_wrapper.framework` 里是挂的代码，卡密验证流程：
 
 ```
-uid=501  pid=xxxxx
-设备: iPad 18.6.2
-
---- 候选枚举 ---
-  [image] /var/containers/Bundle/Application/.../VEspProbe.app/VEspProbe  base=0x...
-  [file] /var/mobile/Library/Preferences/com.okdemo.dskrw.rw.plist
-
---- 尝试连接 ---
-status=4  bootstrap_look_up(com.okdemo.dskrw.rw) 失败: ...
+UITextField 输入卡密
+  → -confirmButtonTapped
+  → URLWithString: + JSONObjectWithData:  (网络验证)
+  → 成功 → 调用 _onConfirm block
+  → 失败 → 弹窗
 ```
 
-**把这段日志发回来**，我根据它判断：
+**hook 策略**（全部用 `method_setImplementation`，不改代码段）：
 
-- 服务能不能 lookup 到
-- token 在不在那些路径
-- 需不需要 entitlement
-
----
-
-## 三、现在这个版本能干什么 / 不能干什么
-
-| 能力 | 状态 |
+| hook 点 | 作用 |
 |---|---|
-| 编译、签名、装到 iPad | ✅ 现在就能 |
-| 枚举 dskrw 相关痕迹 | ✅ 现在就能 |
-| 尝试 lookup 服务 | ✅ 现在就能 |
-| **真正读写内存** | ❌ 等 M1（协议还没挖出来） |
+| `江雪 -setOnConfirm:` | 把验证成功的 block 存下来 |
+| `江雪 -confirmButtonTapped` | 点确认时**直接调用**存下的 block，跳过网络验证 |
+| `-stringForKey:` | 兜底，打印读到的键名和值（诊断用） |
 
-`ProbeClient.m` 里的 `read:` / `write:` 现在是空壳，
-等我把 `com.okdemo.dskrw.rw` 的 mach_msg 协议挖出来，把那两个函数填上就行。
+**不需要 inline hook、不需要内核读写、不需要越狱。**
 
 ---
 
-## 四、代码结构
+## 二、三步走
+
+### 第 1 步：推 GitHub，拿 libhook.dylib
+
+把 `app/` 里的内容推到仓库，Actions 跑 `build-hook-dylib`。
+
+跑完 → Artifacts → **libhook-dylib** → 下载解压得到 `libhook.dylib`（几十 KB）。
+
+### 第 2 步：本地注入
+
+```
+pip install lief
+python tools/inject_ipa.py "<原版无畏契约.ipa>" "<libhook.dylib>" "CodeV_injected.ipa"
+```
+
+输入必须是**原版** `无畏契约：源能行动.ipa`（3.56 GB），
+不是不死鸟改过的包。我们的 hook 只需要 CodeV 加载 libhook.dylib，
+tgpa_wrapper 里的挂代码不动它——等游戏跑起来，dylib 会去 hook 它。
+
+3.5 GB 处理需要几分钟，脚本流式复制，不会爆内存。
+
+### 第 3 步：签名装
+
+```
+全能签 → p12 + mobileprovision → 选 CodeV_injected.ipa → 签名 → 装 iPad
+```
+
+---
+
+## 三、跑起来看什么
+
+游戏加载后 12 秒弹 alert：
+
+```
+license hook
+[license] dylib loaded, pid=xxxx
+类总数: 2500
+发现类: 江雪
+  hook setOnConfirm:
+  hook confirmButtonTapped:
+  hook NSUserDefaults stringForKey:
+完成: setOnConfirm=1 confirm=1 stringForKey=1
+日志: /var/mobile/Containers/.../tmp/vesp_license.log
+```
+
+**A. 三个 hook 都成功** → 进游戏，随便输卡密点确认，应该直接进。
+
+**B. 发现类但没 hook** → 类名可能改了，把 alert 发我。
+
+**C. 没弹 alert** → dylib 没加载，注入失败。
+
+---
+
+## 四、如果 A 也不进
+
+说明 `_onConfirm` 不是「进游戏的开关」。那时日志里的 `stringForKey:` 就有用了，
+它会打印验证状态的键名和值，可以直接往 UserDefaults 写。
+
+把弹窗内容发我。
+
+---
+
+## 五、文件
 
 ```
 app/
-├── .github/workflows/build-ipa.yml    GitHub Actions（macos-14 编译）
-├── project.yml                        XcodeGen 工程描述
-└── Sources/
-    ├── main.m                         UIApplicationMain
-    ├── AppDelegate.h/.m               窗口
-    ├── ProbeViewController.h/.m       界面：按钮 + 日志
-    ├── ProbeClient.h/.m               连 KRW 服务（协议待填）
-    ├── DumpOffsets.h/.c               偏移扫描（纯 C）
-    └── Info.plist
-```
-
-`DumpOffsets.c` 是平台无关的纯逻辑，跟 PC 侧那份 `dump_offsets.cpp` 一一对应，
-只把「内核读」抽象成函数指针 `krw_read_fn`。
-
----
-
-## 五、常见问题
-
-**Q: Actions 报 xcodegen not found**
-```
-brew install xcodegen 这一步失败的话，看看 log，通常是 runner 镜像的问题。
-换 macos-15 试试（改 workflow 里的 runs-on）。
-```
-
-**Q: 编译报 `sandbox_extension_consume` 未定义**
-```
-它是私有 API，需要自己声明：
-  extern int sandbox_extension_consume(const char *);
-我已经在 ProbeClient.m 里声明了，不用改。
-```
-
-**Q: 装上去闪退**
-```
-多半是签名 entitlements 不匹配。让全能签自动处理，别手改。
-```
-
-**Q: 点按钮没反应**
-```
-日志框在下面，往下滚。同时 Xcode → Window → Devices 可以看 Console。
+├── .github/workflows/build-ipa.yml   编译 libhook.dylib
+├── project.yml                       XcodeGen（library.dynamic）
+├── Sources/
+│   ├── hook_license.m                ★ 核心：卡密 hook
+│   ├── ProbeClient.h/.m              （给 Via 用的，一起编译，不影响）
+│   └── DumpOffsets.c/.h              （同上）
+└── tools/
+    └── inject_ipa.py                 ★ 本地注入
 ```

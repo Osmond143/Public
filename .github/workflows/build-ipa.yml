@@ -1,4 +1,4 @@
-name: build-ipa
+name: build-hook-dylib
 
 on:
   push:
@@ -25,12 +25,12 @@ jobs:
           xcodegen generate
           ls -la
 
-      - name: Build (unsigned)
+      - name: Build dylib (unsigned)
         run: |
           set -o pipefail
           xcodebuild \
-            -project VEspProbe.xcodeproj \
-            -scheme VEspProbe \
+            -project libhook.xcodeproj \
+            -target libhook \
             -sdk iphoneos \
             -configuration Release \
             -derivedDataPath build \
@@ -39,24 +39,18 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tail -50
+            build 2>&1 | tail -80
 
-      - name: Locate .app
-        run: find build -name "*.app" -maxdepth 6 -print
-
-      - name: Package IPA
+      - name: Locate dylib
         run: |
-          APP=$(find build -name "VEspProbe.app" -maxdepth 6 | head -1)
-          echo "APP=$APP"
-          mkdir -p out/Payload
-          cp -R "$APP" out/Payload/
-          cd out
-          zip -r VEspProbe.ipa Payload
-          ls -lh VEspProbe.ipa
+          find build -name "*.dylib" -maxdepth 6 -print
+          DYLIB=$(find build -name "libhook.dylib" -maxdepth 6 | head -1)
+          echo "DYLIB=$DYLIB"
+          ls -lh "$DYLIB"
 
-      - name: Upload IPA
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
-          name: VEspProbe-ipa
-          path: out/VEspProbe.ipa
+          name: libhook-dylib
+          path: build/Build/Products/Release-iphoneos/libhook.dylib
           if-no-files-found: error
